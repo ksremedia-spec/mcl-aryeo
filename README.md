@@ -18,11 +18,12 @@ Each run (only when switched on, and only 7:00 AM–9:00 PM New York time):
 3. For each one, oldest order first, it **confirms** with `PUT /v1/appointments/{id}/schedule`. The start is the preferred time, and the end is the start plus the shoot length. It only does this when all of these are true:
    - the preferred time is in the future;
    - the client picked an exact time, not just a day or "morning/afternoon";
-   - it knows how long the shoot is (from the appointment, or failing that, the products on the order);
-   - the time doesn't overlap any **SCHEDULED** appointment. It checks every appointment in Aryeo, paging through all of them, not just the 10 newest.
+   - it knows how long the shoot is. That's the products' durations; the appointment's own duration is used only if no product has one, and if the two disagree, the booking is flagged instead;
+   - the time doesn't overlap any scheduled appointment. It checks every appointment in Aryeo, paging through all of them, not just the 10 newest. An appointment with an unfamiliar status counts as taking its slot.
 4. Otherwise it **flags** the booking as needing manual review. A clash is flagged as "Scheduling conflict, needs manual review", with both orders' numbers, addresses, client names and times.
-5. It never sends a client notification.
-6. It remembers every booking it has confirmed or flagged, so none is ever handled twice. If Aryeo is having a temporary problem, nothing is recorded, and the next run tries again.
+5. It never sends a client notification. Each confirmation says `notify_customer: false` outright, and afterwards the check reads the booking back from Aryeo to make sure it saved.
+6. It remembers every booking it has confirmed or flagged, so none is ever handled twice.
+7. When Aryeo's answer is missing, unreadable or in an unexpected format, the check holds back. That covers a time with no time zone, an appointment whose time can't be read, a list in an unexpected shape, and an order number it can't find. Nothing is recorded in those cases, so the next run tries again, and the problem shows in the status.
 
 There are no emails. To see what it did, ask Claude something like *"What has the auto-confirm check done today?"*
 
@@ -110,7 +111,7 @@ None of these change anything. Send the answers (or anything that looks wrong) t
 ### 7. Turn the check on (when you're ready)
 1. Turn off your old auto-confirm system first, so bookings aren't confirmed twice.
 2. Ask Claude: **"Turn on the auto-confirm check."**
-3. To stop it at any time, ask: **"Turn off the auto-confirm check."**
+3. To stop it at any time, ask: **"Turn off the auto-confirm check."** It can take up to about a minute to reach every Cloudflare location.
    - Emergency stop without Claude: Cloudflare → the Worker → **Settings → Triggers** → delete the cron schedule. The next deploy puts the schedule back, but the switch stays where you left it.
 
 ---
@@ -126,7 +127,8 @@ None of these change anything. Send the answers (or anything that looks wrong) t
 - `PUT /appointments/{id}/schedule`, `POST /order-items`, `POST /appointments/store`, `POST /orders/{id}/payments`, and the `UNSCHEDULED`/`SCHEDULED` statuses.
 - `GET /addresses/{id}` (used by `create_order` to check the address first) and `GET /appointments/{id}` (with a fallback to searching the full list).
 - Field names: `duration` (minutes), `preference_type`, `street_number`, `street_name`, `latitude`, `longitude`, `customer`, `total_amount`, `include=order` on appointments (with a fallback without it).
-- `notify: false` on new orders keeps Aryeo from emailing the client.
+- `notify: false` on new orders, and `notify_customer: false` on confirmations, keep Aryeo from emailing the client. If Aryeo rejects that field, the booking is flagged rather than confirmed, so you'd see it.
+- By default Aryeo's appointment list holds only scheduled, non-canceled appointments (that's how it worked in 2021). That's what the clash check needs.
 - The independent geocoder is the free US Census Bureau geocoder. A pin more than 300 m away is treated as a likely mis-pin.
 
 ## Webhooks (for later)

@@ -9,6 +9,10 @@ const SWITCH_HISTORY_KEY = "settings:auto-confirm:changed";
 const LAST_RUN_KEY = "status:last-run";
 const HANDLED_PREFIX = "handled:";
 const ACTIVITY_PREFIX = "activity:";
+const LOCK_KEY = "lock:auto-confirm";
+const PAYMENT_PREFIX = "payment:";
+/** A run normally takes seconds; a lock older than this is treated as abandoned. */
+const LOCK_SECONDS = 240;
 const MAX_TIMESTAMP = 9_999_999_999_999;
 
 export interface PartySummary {
@@ -95,6 +99,31 @@ export class StateStore {
 		const listing = await this.kv.list({ prefix: ACTIVITY_PREFIX, limit });
 		const entries = await Promise.all(listing.keys.map((key) => this.kv.get<ActivityEntry>(key.name, "json")));
 		return entries.filter((entry): entry is ActivityEntry => entry !== null);
+	}
+
+	/**
+	 * Best-effort lock so two runs (or a run and a confirmation through Claude)
+	 * don't confirm overlapping bookings at the same moment. KV isn't atomic, so
+	 * this narrows the window rather than closing it completely.
+	 */
+	async tryLock(now: number, holder: string): Promise<boolean> {
+		const existing = await this.kv.get<{ at: number; holder: string }>(LOCK_KEY, "json");
+		if (existing && now - existing.at < LOCK_SECONDS * 1000) return false;
+		await this.kv.put(LOCK_KEY, JSON.stringify({ at: now, holder }), { expirationTtl: LOCK_SECONDS + 60 });
+		return true;
+	}
+
+	async unlock(): Promise<void> {
+		await this.kv.delete(LOCK_KEY);
+	}
+
+	/** Remembers an offline payment for a day, so an accidental repeat is caught. */
+	async recentPayment(orderId: string, cents: number, date: string): Promise<string | null> {
+		return this.kv.get(`${PAYMENT_PREFIX}${orderId}:${cents}:${date}`);
+	}
+
+	async rememberPayment(orderId: string, cents: number, date: string, now: number): Promise<void> {
+		await this.kv.put(`${PAYMENT_PREFIX}${orderId}:${cents}:${date}`, new Date(now).toISOString(), { expirationTtl: 86_400 });
 	}
 
 	async setLastRun(run: LastRun): Promise<void> {

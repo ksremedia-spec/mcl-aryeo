@@ -61,6 +61,10 @@ function standardScenario(overrides: Record<string, (call: any) => unknown> = {}
 			"o-1001": { id: "o-1001", number: 1001 },
 		}),
 		"PUT /appointments/a-new/schedule": () => ({ data: { id: "a-new", status: "SCHEDULED" } }),
+		// Read-back after confirming.
+		"GET /appointments/a-new": () => ({
+			data: { id: "a-new", status: "SCHEDULED", start_at: "2026-11-04T15:00:00Z", end_at: "2026-11-04T16:30:00Z" },
+		}),
 		...overrides,
 	});
 }
@@ -81,7 +85,7 @@ describe("auto-confirm check", () => {
 
 		// One confirmation, for the preferred time plus the 90-minute duration, and no notification flag.
 		expect(aryeo.writes()).toEqual([
-			{ method: "PUT", path: "/appointments/a-new/schedule", body: { start_at: "2026-11-04T15:00:00Z", end_at: "2026-11-04T16:30:00Z" } },
+			{ method: "PUT", path: "/appointments/a-new/schedule", body: { start_at: "2026-11-04T15:00:00Z", end_at: "2026-11-04T16:30:00Z", notify_customer: false } },
 		]);
 
 		const confirmed = byResult(report.outcomes, "confirmed");
@@ -200,7 +204,7 @@ describe("auto-confirm check", () => {
 		});
 		const report = await runAutoConfirm(context(aryeo, new MemoryKV()));
 		expect(aryeo.writes()).toEqual([
-			{ method: "PUT", path: "/appointments/x/schedule", body: { start_at: "2026-11-09T15:00:00Z", end_at: "2026-11-09T15:45:00Z" } },
+			{ method: "PUT", path: "/appointments/x/schedule", body: { start_at: "2026-11-09T15:00:00Z", end_at: "2026-11-09T15:45:00Z", notify_customer: false } },
 		]);
 		const flagged = byResult(report.outcomes, "flagged") as Extract<Outcome, { result: "flagged" }>[];
 		expect(flagged[0].entry.reason).toMatch(/how long this shoot is/);

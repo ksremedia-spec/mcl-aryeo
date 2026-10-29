@@ -18,7 +18,15 @@ import {
 	resolveOrderId,
 	safeId,
 } from "./aryeo";
-import { type Outcome, evaluateAppointment, newRunState, runAutoConfirm } from "./autoconfirm";
+import {
+	type Outcome,
+	blocksItsSlot,
+	bookingKey,
+	evaluateAppointment,
+	newRunState,
+	occupiedWindow,
+	runAutoConfirm,
+} from "./autoconfirm";
 import {
 	appointmentOrderId,
 	appointmentWindow,
@@ -26,6 +34,7 @@ import {
 	orderAddressObject,
 	orderNumber,
 	overlaps,
+	parseAryeoTime,
 	positiveNumber,
 	summarizeAppointment,
 	summarizeOrder,
@@ -130,17 +139,16 @@ function endTime(start: number, endAt: string | undefined, durationMinutes: numb
 	return start + minutes * 60_000;
 }
 
+/** Same clash rules as the auto-confirm check: anything unreadable stops us rather than being skipped. */
 async function findClash(aryeo: AryeoClient, window: { start: number; end: number }, ignoreId?: string): Promise<any | null> {
 	const all = await listAllAppointments(aryeo);
 	if (!all.complete) throw new Error("There are too many appointments to check them all for clashes, so I stopped.");
-	return (
-		all.items.find((other) => {
-			if (ignoreId && text(other?.id) === ignoreId) return false;
-			if (upper(other?.status) !== "SCHEDULED") return false;
-			const otherWindow = appointmentWindow(other);
-			return otherWindow !== null && overlaps(window, otherWindow);
-		}) ?? null
-	);
+	const others = all.items.filter((other) => blocksItsSlot(other) && !(ignoreId && text(other?.id) === ignoreId));
+	const unreadable = others.filter((other) => occupiedWindow(other) === null);
+	if (unreadable.length) {
+		throw new Error(`${unreadable.length} scheduled appointment(s) in Aryeo have no readable time, so clashes can't be ruled out. Nothing was changed.`);
+	}
+	return others.find((other) => overlaps(window, occupiedWindow(other)!)) ?? null;
 }
 
 function describeClash(clash: any): string {
@@ -260,7 +268,7 @@ export function buildServer(deps: ToolDeps): McpServer {
 				.map((appointment) => {
 					const status = upper(appointment?.status);
 					const window = appointmentWindow(appointment);
-					const preferred = Date.parse(text(appointment?.preferred_start_at));
+					const preferred = parseAryeoTime(appointment?.preferred_start_at);
 					let sortKey: number | null = null;
 					if (status === "SCHEDULED" && window && window.end >= nowMs) sortKey = window.start;
 					else if (include_unscheduled && status === "UNSCHEDULED") sortKey = Number.isNaN(preferred) ? nowMs : preferred;
@@ -421,16 +429,31 @@ export function buildServer(deps: ToolDeps): McpServer {
 			const appointment = await findAppointment(client, appointment_id);
 			if (!appointment) return failure(`Couldn't find appointment ${appointment_id} in Aryeo.`);
 			const order = await appointmentOrder(client, appointment);
-			const outcome = await evaluateAppointment(
-				{ aryeo: client, store: deps.store, now: now(), dryRun: false, source: "claude", fetchFn: deps.fetchFn },
-				newRunState(),
-				order,
-				appointment,
-				{ respectHandled: false },
-			);
-			const result = reply(describeOutcome(outcome));
-			if (outcome.result !== "confirmed") result.isError = outcome.result !== "flagged";
-			return result;
+			const nowMs = now();
+			const context = { aryeo: client, store: deps.store, now: nowMs, dryRun: false, source: "claude" as const, fetchFn: deps.fetchFn };
+
+			// Already flagged earlier? Re-check without recording anything, so it isn't flagged a second time.
+			const previous = await deps.store.getHandled(bookingKey(appointment));
+			if (previous) {
+				const recheck = await evaluateAppointment({ ...context, dryRun: true }, newRunState(), order, appointment, { respectHandled: false });
+				if (recheck.result !== "confirmed") {
+					return failure(
+						`This booking was already ${previous.kind} on ${formatEastern(previous.at)} (${previous.reason}). It still can't be confirmed:\n${describeOutcome(recheck)}`,
+					);
+				}
+			}
+
+			if (!(await deps.store.tryLock(nowMs, "claude"))) {
+				return failure("The auto-confirm check is running right now. Try again in a minute.");
+			}
+			try {
+				const outcome = await evaluateAppointment(context, newRunState(), order, appointment, { respectHandled: false });
+				const result = reply(describeOutcome(outcome));
+				if (outcome.result !== "confirmed") result.isError = outcome.result !== "flagged";
+				return result;
+			} finally {
+				await deps.store.unlock();
+			}
 		}),
 	);
 
@@ -603,13 +626,18 @@ export function buildServer(deps: ToolDeps): McpServer {
 					.regex(/^\d{4}-\d{2}-\d{2}$/)
 					.optional()
 					.describe("YYYY-MM-DD, defaults to today"),
+				record_again: z
+					.boolean()
+					.default(false)
+					.describe("Only true if the owner confirms a second identical payment on the same day is intended."),
 			}),
 			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 		},
-		guarded(async ({ order, amount_dollars, date }) => {
+		guarded(async ({ order, amount_dollars, date, record_again }) => {
 			const client = aryeo();
 			const id = await resolveOrderId(client, order);
 			const { order: full } = await getOrderWithIncludes(client, id, []);
+			if (IGNORED_ORDER_NUMBERS.has(orderNumber(full))) return failure(`Order #${orderNumber(full)} is the old test record; leaving it alone.`);
 			const cents = Math.round(amount_dollars * 100);
 			if (cents <= 0) return failure("The amount has to be more than $0.");
 			const total = positiveNumber(full?.total_amount);
@@ -617,7 +645,14 @@ export function buildServer(deps: ToolDeps): McpServer {
 				return failure(`$${(cents / 100).toFixed(2)} is more than order #${orderNumber(full)}'s total of ${money(total)}. Nothing was recorded.`);
 			}
 			const paidOn = date ?? easternDate(now());
+			const earlier = await deps.store.recentPayment(id, cents, paidOn);
+			if (earlier && !record_again) {
+				return failure(
+					`A $${(cents / 100).toFixed(2)} payment dated ${paidOn} was already recorded on order #${orderNumber(full)} at ${formatEastern(earlier)}. Nothing was recorded again.`,
+				);
+			}
 			await client.post(`/orders/${id}/payments`, { amount: cents, currency: "USD", collection_source: "CHECK", date: paidOn });
+			await deps.store.rememberPayment(id, cents, paidOn, now());
 			const { order: after } = await getOrderWithIncludes(client, id, []);
 			return reply(
 				`Recorded a $${(cents / 100).toFixed(2)} check payment on order #${orderNumber(full)} dated ${paidOn}. Payment status is now ${text(after?.payment_status) || "(not shown)"}.`,

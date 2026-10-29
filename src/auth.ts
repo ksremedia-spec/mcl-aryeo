@@ -21,6 +21,15 @@ type AuthEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
 /** Claude's hosted apps (web, desktop, mobile) sign in through these. Nothing else may. */
 export const ALLOWED_REDIRECT_URIS = new Set(["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]);
 
+function isClaudeRedirect(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		return ALLOWED_REDIRECT_URIS.has(parsed.origin + parsed.pathname);
+	} catch {
+		return false;
+	}
+}
+
 const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_ISSUERS = new Set(["https://accounts.google.com", "accounts.google.com"]);
@@ -91,7 +100,10 @@ function decodeJwtPayload(jwt: string): any {
 }
 
 function renderAuthError(error: unknown): Response {
-	if (error instanceof AuthorizationError && error.redirectTo) return Response.redirect(error.redirectTo, 302);
+	// Error redirects go back to the app only if that app is Claude.
+	if (error instanceof AuthorizationError && error.redirectTo && isClaudeRedirect(error.redirectTo)) {
+		return Response.redirect(error.redirectTo, 302);
+	}
 	if (error instanceof AuthorizationError) return errorPage(error.description || "This sign-in link has expired or was already used.");
 	if (error instanceof CimdFetchError) return errorPage("The app asking to connect couldn't be verified.");
 	throw error;
@@ -146,6 +158,7 @@ async function handleCallback(request: Request, env: AuthEnv): Promise<Response>
 	const { request: original, data, headers } = await oauth.finishUpstream<{ verifier: string }>(request);
 
 	if (url.searchParams.get("error")) {
+		if (!isClaudeRedirect(original.redirectUri)) return errorPage("Sign-in was cancelled.");
 		headers.set("Location", authorizationErrorRedirect(original, "access_denied"));
 		return new Response(null, { status: 302, headers });
 	}

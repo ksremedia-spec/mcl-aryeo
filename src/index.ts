@@ -46,7 +46,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
 			// Only Claude may register (sign-in is refused for anything else anyway).
 			clientRegistrationCallback: ({ clientMetadata }) => {
 				const uris = Array.isArray(clientMetadata.redirect_uris) ? clientMetadata.redirect_uris : [];
-				if (!uris.some((uri) => ALLOWED_REDIRECT_URIS.has(String(uri)))) {
+				if (!uris.length || !uris.every((uri) => ALLOWED_REDIRECT_URIS.has(String(uri)))) {
 					return { description: "Only Claude can connect to this server.", status: 403, code: "access_denied" };
 				}
 			},

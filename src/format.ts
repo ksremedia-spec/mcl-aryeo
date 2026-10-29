@@ -51,15 +51,26 @@ export function clientName(order: any): string {
 	);
 }
 
+/**
+ * An Aryeo timestamp in ms, or NaN. Only full ISO times with "Z" or an offset
+ * count: a time with no zone ("2026-11-04 10:00:00") is ambiguous, and reading
+ * it as UTC would put the shoot hours off.
+ */
+export function parseAryeoTime(value: unknown): number {
+	const raw = text(value);
+	if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) return Number.NaN;
+	return Date.parse(raw.replace(" ", "T"));
+}
+
 export function appointmentOrderId(appointment: any): string {
 	return text(appointment?.order?.id) || text(appointment?.order_id);
 }
 
 /** Start/end of an appointment in ms, or null when it has no usable times. */
 export function appointmentWindow(appointment: any, fallbackMinutes = 60): { start: number; end: number } | null {
-	const start = Date.parse(text(appointment?.start_at));
+	const start = parseAryeoTime(appointment?.start_at);
 	if (Number.isNaN(start)) return null;
-	let end = Date.parse(text(appointment?.end_at));
+	let end = parseAryeoTime(appointment?.end_at);
 	if (Number.isNaN(end) || end <= start) {
 		const minutes = positiveNumber(appointment?.duration) ?? fallbackMinutes;
 		end = start + minutes * 60_000;

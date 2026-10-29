@@ -279,3 +279,64 @@ describe("aryeo_lookup", () => {
 		expect(aryeo.writes()).toEqual([]);
 	});
 });
+
+describe("review follow-ups", () => {
+	it("re-checking an already-flagged booking doesn't flag it a second time", async () => {
+		const appointment = { id: "a", status: "UNSCHEDULED", preferred_start_at: "2026-11-01T15:00:00Z", duration: 60, order: { id: "o-a", number: 1050 } };
+		const aryeo = new FakeAryeo({
+			"GET /appointments/a": () => ({ data: appointment }),
+			"GET /orders/o-a": () => ({ data: { id: "o-a", number: 1050, address: ADDRESS, customer: { name: "Pat" } } }),
+		});
+		const { call, kv } = await connect(aryeo);
+		const first = await call("confirm_appointment", { appointment_id: "a" });
+		expect(first.text).toContain("FLAGGED");
+		const second = await call("confirm_appointment", { appointment_id: "a" });
+		expect(second.isError).toBe(true);
+		expect(second.text).toContain("already flagged");
+		expect((await new StateStore(kv.asKV()).listActivity(10)).length).toBe(1);
+		expect(aryeo.writes()).toEqual([]);
+	});
+
+	it("refuses to record the same payment twice in a day unless told to", async () => {
+		const aryeo = new FakeAryeo({
+			"GET /orders": () => ({ data: [{ id: "o-1", number: 1042 }], meta: { last_page: 1 } }),
+			"GET /orders/o-1": () => ({ data: { id: "o-1", number: 1042, total_amount: 30000 } }),
+			"POST /orders/o-1/payments": () => ({}),
+		});
+		const { call } = await connect(aryeo);
+		await call("mark_order_paid_offline", { order: "1042", amount_dollars: 100 });
+		const again = await call("mark_order_paid_offline", { order: "1042", amount_dollars: 100 });
+		expect(again.isError).toBe(true);
+		expect(aryeo.writes()).toHaveLength(1);
+		await call("mark_order_paid_offline", { order: "1042", amount_dollars: 100, record_again: true });
+		expect(aryeo.writes()).toHaveLength(2);
+	});
+
+	it("won't record a payment on order #1005", async () => {
+		const aryeo = new FakeAryeo({
+			"GET /orders": () => ({ data: [{ id: "o-t", number: 1005 }], meta: { last_page: 1 } }),
+			"GET /orders/o-t": () => ({ data: { id: "o-t", number: 1005, total_amount: 30000 } }),
+		});
+		const { call } = await connect(aryeo);
+		expect((await call("mark_order_paid_offline", { order: "1005", amount_dollars: 10 })).isError).toBe(true);
+		expect(aryeo.writes()).toEqual([]);
+	});
+
+	it("refuses to book over an appointment whose time it can't read", async () => {
+		const aryeo = new FakeAryeo({
+			"GET /addresses/addr-1": () => ({ data: ADDRESS }),
+			"GET /appointments": bookWith({ id: "x", status: "SCHEDULED", start_at: "2026-11-10 10:00", end_at: null }),
+		});
+		const { call } = await connect(aryeo);
+		const result = await call("create_order", {
+			customer_id: "c",
+			address_id: "addr-1",
+			product_variant_id: "v",
+			start_at: "2026-11-10T10:00",
+			duration_minutes: 60,
+		});
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain("no readable time");
+		expect(aryeo.writes()).toEqual([]);
+	});
+});

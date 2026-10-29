@@ -46,7 +46,7 @@ async function setup(email: string) {
 		GOOGLE_CLIENT_ID: "google-client-id",
 		GOOGLE_CLIENT_SECRET: "google-client-secret",
 		ARYEO_API_KEY: "aryeo-key",
-		ARYEO_BASE_URL: "https://aryeo.test/v1",
+		ARYEO_BASE_URL: "http://127.0.0.1:9/v1",
 	} as unknown as Env;
 	const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
 	// Cloudflare always sends a Host header; Node's Request doesn't add one by itself.
@@ -75,7 +75,7 @@ async function setup(email: string) {
 				}),
 			});
 		}
-		if (url.startsWith("https://aryeo.test/v1/orders")) {
+		if (url.startsWith("http://127.0.0.1:9/v1/orders")) {
 			return Response.json({ data: [{ id: "o-1", number: 1042, created_at: "2026-10-28T12:00:00Z", appointments: [], address: { unparsed_address: "12 Harbor Lane, Mystic, CT" }, customer: { name: "Pat Client" } }] });
 		}
 		return realFetch(input as any, init);
@@ -208,7 +208,7 @@ describe("sign-in", () => {
 		const listedText = await listed.text();
 		expect(listed.status).toBe(200);
 		expect(listedText).toContain("Pat Client");
-		const aryeoCall = seen.find((s) => s.url.startsWith("https://aryeo.test/v1/orders"));
+		const aryeoCall = seen.find((s) => s.url.startsWith("http://127.0.0.1:9/v1/orders"));
 		expect(aryeoCall?.headers.get("Accept")).toBe("application/json");
 		expect(aryeoCall?.headers.get("Authorization")).toBe("Bearer aryeo-key");
 
@@ -235,5 +235,12 @@ describe("sign-in", () => {
 			body: JSON.stringify({ client_name: "Claude (honest)", redirect_uris: ["https://evil.example/callback"], token_endpoint_auth_method: "none" }),
 		});
 		expect(registration.status).toBe(403);
+
+		const mixed = await call("/register", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ client_name: "Sneaky", redirect_uris: [CLAUDE_CALLBACK, "https://evil.example/callback"], token_endpoint_auth_method: "none" }),
+		});
+		expect(mixed.status).toBe(403);
 	});
 });

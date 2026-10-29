@@ -57,7 +57,7 @@ export function createAryeoClient(
 	apiKey: string,
 	options: { baseUrl?: string; fetch?: typeof fetch } = {},
 ): AryeoClient {
-	const baseUrl = (options.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
+	const baseUrl = checkedBaseUrl(options.baseUrl);
 	const doFetch = options.fetch ?? fetch;
 	let calls = 0;
 
@@ -103,6 +103,21 @@ export function createAryeoClient(
 }
 
 /**
+ * The API key may only ever be sent to Aryeo itself, or to a mock server on this
+ * machine during local testing. Anything else (a typo'd or malicious
+ * ARYEO_BASE_URL) is refused so the key can't leak.
+ */
+export function checkedBaseUrl(override?: string): string {
+	if (!override) return DEFAULT_BASE_URL;
+	const url = new URL(override);
+	const local = url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname);
+	if (!local && url.origin !== new URL(DEFAULT_BASE_URL).origin) {
+		throw new Error("ARYEO_BASE_URL may only point at api.aryeo.com (or a local test server).");
+	}
+	return override.replace(/\/+$/, "");
+}
+
+/**
  * IDs go into URL paths, so only plain ID characters are allowed. This stops a
  * crafted value like "x/../../orders" from turning a call into a different one.
  */
@@ -117,6 +132,16 @@ export function asList(body: unknown): any[] {
 	if (Array.isArray(body)) return body;
 	if (body && typeof body === "object" && Array.isArray((body as any).data)) return (body as any).data;
 	return [];
+}
+
+/**
+ * Like asList, but an answer in any other shape is an error rather than "no
+ * results". Used wherever an empty list would be taken as "nothing clashes".
+ */
+export function asListStrict(body: unknown, what: string): any[] {
+	if (Array.isArray(body)) return body;
+	if (body && typeof body === "object" && Array.isArray((body as any).data)) return (body as any).data;
+	throw new Error(`Aryeo's ${what} came back in an unexpected format, so it can't be trusted.`);
 }
 
 /** {"data": {...}} or {...} → object. */
@@ -137,7 +162,9 @@ function hasMorePages(body: unknown, page: number, perPage: number, count: numbe
 		const links = (body as any).links;
 		if (links && typeof links === "object" && "next" in links) return Boolean(links.next);
 	}
-	return count >= perPage;
+	// No paging information: keep going until a page comes back empty, in case
+	// Aryeo returns fewer rows per page than we asked for.
+	return count > 0;
 }
 
 export interface PagedResult {
@@ -156,7 +183,7 @@ export async function getAllPages(
 	const items: any[] = [];
 	for (let page = 1; page <= maxPages; page++) {
 		const body = await client.get(path, { ...query, per_page: perPage, page });
-		const list = asList(body);
+		const list = asListStrict(body, `${path} list`);
 		items.push(...list);
 		if (list.length === 0 || !hasMorePages(body, page, perPage, list.length)) {
 			return { items, complete: true, pages: page };
