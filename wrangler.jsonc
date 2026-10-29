@@ -1,0 +1,43 @@
+/**
+ * Cloudflare settings for the Horizon Home Media Aryeo connector.
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ *
+ * Secrets are NOT in this file. Add them in the Cloudflare dashboard
+ * (Worker > Settings > Variables and Secrets > Add > type "Secret"):
+ *   ARYEO_API_KEY         your Aryeo API key
+ *   GOOGLE_CLIENT_ID      from your Google Cloud OAuth client
+ *   GOOGLE_CLIENT_SECRET  from your Google Cloud OAuth client
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Must match the Worker's name in the Cloudflare dashboard.
+  "name": "mcl-aryeo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // global_fetch_strictly_public is required for Claude's "published identity" sign-in (CIMD).
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // One public address only: https://mcl-aryeo.<your-subdomain>.workers.dev
+  "workers_dev": true,
+  "preview_urls": false,
+  // Storage. Cloudflare creates these automatically on the first deploy.
+  "kv_namespaces": [
+    // Sign-in records (managed by the OAuth library).
+    { "binding": "OAUTH_KV" },
+    // The auto-confirm on/off switch, the "already handled" list and the activity log.
+    { "binding": "STATE_KV" }
+  ],
+  "triggers": {
+    // Cron schedules are UTC only. This covers 7:00 AM-9:00 PM Eastern in both
+    // EDT (11:00-01:00 UTC) and EST (12:00-02:00 UTC); the code checks the real
+    // New York time on every run and skips runs outside 7:00 AM-9:00 PM.
+    // The check also does nothing until it is switched on (it starts OFF).
+    "crons": ["*/5 0-2,11-23 * * *"]
+  },
+  "vars": {
+    // The only Google account allowed to sign in to the connector.
+    "ALLOWED_EMAIL": "ksremedia@gmail.com"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
